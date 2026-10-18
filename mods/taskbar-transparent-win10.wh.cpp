@@ -1,10 +1,9 @@
 // ==WindhawkMod==
-// @id              explorer-transparent-win10
-// @name            Explorer Transparente (Win10)
-// @description     Deixa a janela do File Explorer com moldura transparente (blur/acrylic)
+// @id              taskbar-transparent-win10
+// @name            Barra de Tarefas Transparente (Win10)
+// @description     Deixa a barra de tarefas do Windows 10 transparente (blur ou acrylic)
 // @version         1.0
 // @author          Nelson
-// @github          https://github.com/Matheussidis
 // @include         explorer.exe
 // @license         MIT
 // ==/WindhawkMod==
@@ -18,6 +17,10 @@
 // ==/WindhawkModSettings==
 
 #include <windows.h>
+
+// ============================================================================
+// Definições da API SetWindowCompositionAttribute (não documentada)
+// ============================================================================
 
 typedef enum _WINDOWCOMPOSITIONATTRIB {
     WCA_ACCENT_POLICY = 19,
@@ -37,12 +40,16 @@ typedef enum _ACCENT_STATE {
 typedef struct _ACCENT_POLICY {
     ACCENT_STATE AccentState;
     DWORD AccentFlags;
-    DWORD GradientColor;
+    DWORD GradientColor; // Formato ABGR (Alpha, Blue, Green, Red)
     DWORD AnimationId;
 } ACCENT_POLICY;
 
 using SetWindowCompositionAttribute_t = BOOL(WINAPI*)(HWND, WINDOWCOMPOSITIONATTRIBDATA*);
 SetWindowCompositionAttribute_t SetWindowCompositionAttribute_Original = nullptr;
+
+// ============================================================================
+// Configurações globais
+// ============================================================================
 
 struct {
     bool useAcrylic;
@@ -52,6 +59,9 @@ struct {
 
 volatile bool g_stopThread = false;
 
+// ============================================================================
+// Aplicar transparência
+// ============================================================================
 void ApplyTransparency(HWND hWnd) {
     if (!hWnd || !SetWindowCompositionAttribute_Original) return;
 
@@ -61,6 +71,7 @@ void ApplyTransparency(HWND hWnd) {
         ? ACCENT_ENABLE_ACRYLICBLURBEHIND
         : ACCENT_ENABLE_BLURBEHIND;
     policy.AccentFlags = 2;
+    // GradientColor = AABBGGRR (alpha, blue, green, red) — preto com alpha
     policy.GradientColor = ((DWORD)settings.opacity << 24) | 0x000000;
 
     WINDOWCOMPOSITIONATTRIBDATA data;
@@ -72,23 +83,40 @@ void ApplyTransparency(HWND hWnd) {
     SetWindowCompositionAttribute_Original(hWnd, &data);
 }
 
-bool IsExplorerWindow(const WCHAR* className) {
-    return wcscmp(className, L"CabinetWClass") == 0 ||
-           wcscmp(className, L"ExploreWClass") == 0;
+
+
+
+
+
+
+bool IsTaskbarClass(const WCHAR* className) {
+    return wcscmp(className, L"Shell_TrayWnd") == 0 ||
+           wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
 }
 
-BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM) {
-    WCHAR className[64] = {0};
-    GetClassNameW(hWnd, className, 64);
-    if (IsExplorerWindow(className)) {
-        ApplyTransparency(hWnd);
+void ApplyToAllTaskbars() {
+    // Barra principal
+    HWND hTaskbar = FindWindow(L"Shell_TrayWnd", nullptr);
+    if (hTaskbar) ApplyTransparency(hTaskbar);
+
+    // Barras secundárias (multi-monitor)
+    HWND hSecondary = nullptr;
+    while ((hSecondary = FindWindowEx(nullptr, hSecondary,
+                                     L"Shell_SecondaryTrayWnd", nullptr))) {
+        ApplyTransparency(hSecondary);
     }
-    return TRUE;
 }
 
-void ApplyToAllExplorers() {
-    EnumWindows(EnumWindowsProc, 0);
-}
+
+
+
+
+
+
+
+// ============================================================================
+// Hook em SetWindowCompositionAttribute
+// ============================================================================
 
 BOOL WINAPI SetWindowCompositionAttribute_Hook(HWND hWnd, WINDOWCOMPOSITIONATTRIBDATA* data) {
     if (data && data->Attrib == WCA_ACCENT_POLICY &&
@@ -96,7 +124,7 @@ BOOL WINAPI SetWindowCompositionAttribute_Hook(HWND hWnd, WINDOWCOMPOSITIONATTRI
         WCHAR className[64] = {0};
         GetClassNameW(hWnd, className, 64);
 
-        if (IsExplorerWindow(className)) {
+        if (IsTaskbarClass(className)) {
             ACCENT_POLICY* policy = (ACCENT_POLICY*)data->pvData;
             policy->AccentState = settings.useAcrylic
                 ? ACCENT_ENABLE_ACRYLICBLURBEHIND
@@ -108,14 +136,22 @@ BOOL WINAPI SetWindowCompositionAttribute_Hook(HWND hWnd, WINDOWCOMPOSITIONATTRI
     return SetWindowCompositionAttribute_Original(hWnd, data);
 }
 
+// ============================================================================
+// Thread de reaplicação periódica
+// ============================================================================
+
 DWORD WINAPI ReapplyThread(LPVOID) {
     while (!g_stopThread) {
         Sleep(settings.pollingMs);
         if (g_stopThread) break;
-        ApplyToAllExplorers();
+        ApplyToAllTaskbars();
     }
     return 0;
 }
+
+// ============================================================================
+// Carregar configurações
+// ============================================================================
 
 void LoadSettings() {
     PCWSTR mode = Wh_GetStringSetting(L"mode");
@@ -131,11 +167,16 @@ void LoadSettings() {
     if (settings.pollingMs > 5000) settings.pollingMs = 5000;
 }
 
+// ============================================================================
+// Entry points do Windhawk
+// ============================================================================
+
 BOOL Wh_ModInit() {
     Wh_Log(L"Init");
     LoadSettings();
     g_stopThread = false;
 
+    // Pega o endereço de SetWindowCompositionAttribute no user32.dll
     HMODULE user32 = GetModuleHandle(L"user32.dll");
     void* pFunc = (void*)GetProcAddress(user32, "SetWindowCompositionAttribute");
 
@@ -149,8 +190,10 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
-    ApplyToAllExplorers();
+    // Aplica imediatamente
+    ApplyToAllTaskbars();
 
+    // Inicia thread de reaplicação
     HANDLE hThread = CreateThread(nullptr, 0, ReapplyThread, nullptr, 0, nullptr);
     if (hThread) CloseHandle(hThread);
 
@@ -165,5 +208,5 @@ void Wh_ModUninit() {
 void Wh_ModSettingsChanged() {
     Wh_Log(L"SettingsChanged");
     LoadSettings();
-    ApplyToAllExplorers();
+    ApplyToAllTaskbars();
 }
